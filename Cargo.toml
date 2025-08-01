@@ -1,0 +1,13 @@
+[package]
+name = "cargo-attach"
+version = "0.1.0"
+edition = "2024"
+
+description = "A Cargo plugin simplifying probe-rs attach"
+repository = "https://github.com/finn-eger/cargo-attach"
+license = "MIT"
+categories = ["development-tools::cargo-plugins", "embedded"]
+
+[dependencies]
+cargo_metadata = "0.21.0"
+walkdir = "2.5.0"

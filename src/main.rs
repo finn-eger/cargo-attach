@@ -48,6 +48,21 @@ fn attach() -> Result<(), Box<dyn Error>> {
         .and_then(|t| t.get("target"))
         .and_then(|v| v.as_str());
 
+    // Have fun!
+    let probe_args = cargo_config
+        .get("target")
+        .and_then(|v| v.as_table())
+        .map(|t| t.values())
+        .and_then(|v| {
+            v.filter_map(|t| t.get("runner").and_then(|v| v.as_str()))
+                .filter_map(|r| r.strip_prefix("probe-rs run "))
+                .map(|a| a.split_whitespace().collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+                .try_into()
+                .ok()
+        })
+        .map(|[a]: [_; 1]| a);
+
     let mut target_dir = metadata.target_directory.to_owned();
 
     if let Some(target_triple) = target_triple {
@@ -64,6 +79,7 @@ fn attach() -> Result<(), Box<dyn Error>> {
 
     let status = Command::new("probe-rs")
         .arg("attach")
+        .args(probe_args.as_deref().unwrap_or_default())
         .arg(executable.path())
         .status()?;
 

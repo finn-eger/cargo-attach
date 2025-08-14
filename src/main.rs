@@ -1,9 +1,11 @@
 use std::{
     error::Error,
+    fs::read_to_string,
     process::{Command, ExitCode},
 };
 
 use cargo_metadata::MetadataCommand;
+use toml::Table;
 use walkdir::WalkDir;
 
 fn main() -> ExitCode {
@@ -34,7 +36,23 @@ fn attach() -> Result<(), Box<dyn Error>> {
         .map(|t| &t.name)
         .collect::<Vec<_>>();
 
-    let target_dir = &metadata.target_directory;
+    let cargo_config_path = &package.manifest_path.with_file_name(".cargo/config.toml");
+    let cargo_config: Table = read_to_string(cargo_config_path)
+        .map_err(|_| format!("could not read {cargo_config_path}"))?
+        .parse()
+        .map_err(|_| "could not parse {cargo_config_path}")?;
+
+    let target_triple = cargo_config
+        .get("build")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("target"))
+        .and_then(|v| v.as_str());
+
+    let mut target_dir = metadata.target_directory.to_owned();
+
+    if let Some(target_triple) = target_triple {
+        target_dir.push(target_triple);
+    }
 
     let executable = WalkDir::new(target_dir)
         .into_iter()

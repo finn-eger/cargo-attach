@@ -1,6 +1,5 @@
 use std::{
     error::Error,
-    os::unix::process::CommandExt,
     process::{Command, ExitCode},
 };
 
@@ -45,10 +44,14 @@ fn attach() -> Result<(), Box<dyn Error>> {
         .max_by_key(|e| e.metadata().unwrap().modified().unwrap())
         .ok_or(format!("no executable found for package {}", package.name))?;
 
-    let _ = Command::new("probe-rs")
+    let status = Command::new("probe-rs")
         .arg("attach")
         .arg(executable.path())
-        .exec();
+        .status()?;
+
+    if !status.success() {
+        Err(status.to_string())?
+    }
 
     Ok(())
 }

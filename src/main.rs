@@ -57,12 +57,13 @@ fn attach() -> Result<(), Box<dyn Error>> {
         .and_then(|v| {
             v.filter_map(|t| t.get("runner").and_then(|v| v.as_str()))
                 .filter_map(|r| r.strip_prefix("probe-rs run "))
-                .map(|a| a.split_whitespace().collect::<Vec<_>>())
                 .collect::<Vec<_>>()
                 .try_into()
                 .ok()
         })
-        .map(|[a]: [_; 1]| a);
+        .map(|[r]: [_; 1]| r)
+        .and_then(|a| shlex::split(a))
+        .ok_or("could not parse probe-rs arguments")?;
 
     let mut target_dir = metadata.target_directory.to_owned();
 
@@ -80,7 +81,7 @@ fn attach() -> Result<(), Box<dyn Error>> {
 
     Err(Command::new("probe-rs")
         .arg("attach")
-        .args(probe_args.as_deref().unwrap_or_default())
+        .args(probe_args)
         .arg(executable.path())
         .exec())?
 }

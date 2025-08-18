@@ -41,6 +41,10 @@ struct Args {
     #[argh(option, arg_name = "TRIPLE")]
     #[doc = "only consider builds for the given target triple"]
     target: Option<String>,
+
+    #[argh(positional, greedy)]
+    #[doc = "arguments to pass to probe-rs"]
+    probe_args: Vec<String>,
 }
 
 fn attach(args: Args) -> Result<(), Box<dyn Error>> {
@@ -81,21 +85,26 @@ fn attach(args: Args) -> Result<(), Box<dyn Error>> {
     };
 
     // Have fun!
-    let probe_args = cargo_config
-        .get_or_load()?
-        .get("target")
-        .and_then(|v| v.as_table())
-        .map(|t| t.values())
-        .and_then(|v| {
-            v.filter_map(|t| t.get("runner").and_then(|v| v.as_str()))
-                .filter_map(|r| r.strip_prefix("probe-rs run "))
-                .collect::<Vec<_>>()
-                .try_into()
-                .ok()
-        })
-        .map(|[r]: [_; 1]| r)
-        .and_then(|a| shlex::split(a))
-        .ok_or("could not parse probe-rs arguments")?;
+    let probe_args = if !args.probe_args.is_empty() {
+        args.probe_args
+    } else {
+        cargo_config
+            .get_or_load()?
+            .get("target")
+            .and_then(|v| v.as_table())
+            .map(|t| t.values())
+            .and_then(|v| {
+                v.filter_map(|t| t.get("runner").and_then(|v| v.as_str()))
+                    .filter_map(|r| r.strip_prefix("probe-rs run "))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .ok()
+            })
+            .map(|[r]: [_; 1]| r)
+            .map(|a| shlex::split(a))
+            .unwrap_or_default()
+            .ok_or("could not parse probe-rs arguments")?
+    };
 
     let mut target_dir = metadata.target_directory.clone();
 

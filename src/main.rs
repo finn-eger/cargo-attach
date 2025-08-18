@@ -6,7 +6,7 @@ use std::{
 };
 
 use argh::FromArgs;
-use cargo_metadata::MetadataCommand;
+use cargo_metadata::{MetadataCommand, camino::Utf8PathBuf};
 use toml::Table;
 use walkdir::WalkDir;
 
@@ -66,15 +66,13 @@ fn attach(args: Args) -> Result<(), Box<dyn Error>> {
         .map(|t| &t.name)
         .collect::<Vec<_>>();
 
-    let cargo_config_path = &package.manifest_path.with_file_name(".cargo/config.toml");
-    let cargo_config: Table = read_to_string(cargo_config_path)
-        .map_err(|_| format!("could not read {cargo_config_path}"))?
-        .parse()
-        .map_err(|_| "could not parse {cargo_config_path}")?;
+    let cargo_config_path = package.manifest_path.with_file_name(".cargo/config.toml");
+    let mut cargo_config = CargoConfig::Unloaded(cargo_config_path);
 
     let target_triple = match args.target {
         Some(t) => Some(t),
         None => cargo_config
+            .get_or_load()?
             .get("build")
             .and_then(|v| v.as_table())
             .and_then(|t| t.get("target"))
@@ -84,6 +82,7 @@ fn attach(args: Args) -> Result<(), Box<dyn Error>> {
 
     // Have fun!
     let probe_args = cargo_config
+        .get_or_load()?
         .get("target")
         .and_then(|v| v.as_table())
         .map(|t| t.values())
@@ -127,4 +126,30 @@ fn attach(args: Args) -> Result<(), Box<dyn Error>> {
         .args(probe_args)
         .arg(executable.path())
         .exec())?
+}
+
+enum CargoConfig {
+    Unloaded(Utf8PathBuf),
+    Loaded(Table),
+}
+
+impl CargoConfig {
+    fn get_or_load(&mut self) -> Result<&Table, Box<dyn Error>> {
+        match self {
+            Self::Loaded(table) => Ok(table),
+            Self::Unloaded(path) => {
+                *self = Self::Loaded(
+                    read_to_string(&path)
+                        .map_err(|_| format!("could not read {path}"))?
+                        .parse()
+                        .map_err(|_| "could not parse {p}")?,
+                );
+
+                match self {
+                    Self::Loaded(table) => Ok(table),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
 }

@@ -37,6 +37,10 @@ struct Args {
     #[argh(switch, short = 'd')]
     #[doc = "only consider debug builds"]
     debug: bool,
+
+    #[argh(option, arg_name = "TRIPLE")]
+    #[doc = "only consider builds for the given target triple"]
+    target: Option<String>,
 }
 
 fn attach(args: Args) -> Result<(), Box<dyn Error>> {
@@ -68,11 +72,15 @@ fn attach(args: Args) -> Result<(), Box<dyn Error>> {
         .parse()
         .map_err(|_| "could not parse {cargo_config_path}")?;
 
-    let target_triple = cargo_config
-        .get("build")
-        .and_then(|v| v.as_table())
-        .and_then(|t| t.get("target"))
-        .and_then(|v| v.as_str());
+    let target_triple = match args.target {
+        Some(t) => Some(t),
+        None => cargo_config
+            .get("build")
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("target"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+    };
 
     // Have fun!
     let probe_args = cargo_config
@@ -90,7 +98,7 @@ fn attach(args: Args) -> Result<(), Box<dyn Error>> {
         .and_then(|a| shlex::split(a))
         .ok_or("could not parse probe-rs arguments")?;
 
-    let mut target_dir = metadata.target_directory.to_owned();
+    let mut target_dir = metadata.target_directory.clone();
 
     if let Some(target_triple) = target_triple {
         target_dir.push(target_triple);

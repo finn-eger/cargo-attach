@@ -5,12 +5,15 @@ use std::{
     process::{Command, ExitCode},
 };
 
+use argh::FromArgs;
 use cargo_metadata::MetadataCommand;
 use toml::Table;
 use walkdir::WalkDir;
 
 fn main() -> ExitCode {
-    if let Err(error) = attach() {
+    let args = argh::cargo_from_env();
+
+    if let Err(error) = attach(args) {
         // Trim trailing newline from Cargo's error messages.
         let error = format!("{error}");
         let error = error.trim();
@@ -23,12 +26,34 @@ fn main() -> ExitCode {
     }
 }
 
-fn attach() -> Result<(), Box<dyn Error>> {
+#[derive(FromArgs, Debug)]
+#[doc = "Run `probe-rs attach` with the most recently modified binary or
+example for the current package."]
+struct Args {
+    #[argh(switch, short = 'r')]
+    #[doc = "only consider release builds"]
+    release: bool,
+
+    #[argh(switch, short = 'd')]
+    #[doc = "only consider debug builds"]
+    debug: bool,
+}
+
+fn attach(args: Args) -> Result<(), Box<dyn Error>> {
+    if args.release && args.debug {
+        Err("the release and debug flags may not be used together")?;
+    }
+
     let metadata = MetadataCommand::new().exec()?;
 
     let package = metadata
         .root_package()
         .ok_or("could not determine which package to use binaries from")?;
+
+    let build_mode = args
+        .release
+        .then_some("release")
+        .or(args.debug.then_some("debug"));
 
     let target_names = package
         .targets
@@ -71,13 +96,23 @@ fn attach() -> Result<(), Box<dyn Error>> {
         target_dir.push(target_triple);
     }
 
-    let executable = WalkDir::new(target_dir)
+    let executable = WalkDir::new(&target_dir)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            build_mode.is_none_or(|m| {
+                e.path()
+                    .strip_prefix(&target_dir)
+                    .is_ok_and(|p| p.starts_with(m))
+            })
+        })
         .filter(|e| target_names.iter().any(|x| x.as_str() == e.file_name()))
         .max_by_key(|e| e.metadata().unwrap().modified().unwrap())
-        .ok_or(format!("no executable found for package {}", package.name))?;
+        .ok_or(format!(
+            "no matching executable found for package {}",
+            package.name
+        ))?;
 
     Err(Command::new("probe-rs")
         .arg("attach")

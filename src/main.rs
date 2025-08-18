@@ -42,6 +42,14 @@ struct Args {
     #[doc = "only consider builds for the given target triple"]
     target: Option<String>,
 
+    #[argh(option, arg_name = "NAME")]
+    #[doc = "attach to the named binary"]
+    bin: Option<String>,
+
+    #[argh(option, arg_name = "NAME")]
+    #[doc = "attach to the named example"]
+    example: Option<String>,
+
     #[argh(positional, greedy)]
     #[doc = "arguments to pass to probe-rs"]
     probe_args: Vec<String>,
@@ -50,6 +58,10 @@ struct Args {
 fn attach(args: Args) -> Result<(), Box<dyn Error>> {
     if args.release && args.debug {
         Err("the release and debug flags may not be used together")?;
+    }
+
+    if args.bin.is_some() && args.example.is_some() {
+        Err("the bin and example options may not be used together")?;
     }
 
     let metadata = MetadataCommand::new().exec()?;
@@ -63,12 +75,15 @@ fn attach(args: Args) -> Result<(), Box<dyn Error>> {
         .then_some("release")
         .or(args.debug.then_some("debug"));
 
-    let target_names = package
-        .targets
-        .iter()
-        .filter(|t| t.is_bin() || t.is_example())
-        .map(|t| &t.name)
-        .collect::<Vec<_>>();
+    let target_names = match args.bin.or(args.example) {
+        Some(n) => vec![n],
+        None => package
+            .targets
+            .iter()
+            .filter(|t| t.is_bin() || t.is_example())
+            .map(|t| t.name.clone())
+            .collect(),
+    };
 
     let cargo_config_path = package.manifest_path.with_file_name(".cargo/config.toml");
     let mut cargo_config = CargoConfig::Unloaded(cargo_config_path);

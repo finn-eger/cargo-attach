@@ -1,29 +1,28 @@
 use std::{
+    convert::Infallible,
     error::Error,
     fs::read_to_string,
+    io::ErrorKind,
     os::unix::process::CommandExt,
+    path::PathBuf,
     process::{Command, ExitCode},
 };
 
 use argh::FromArgs;
-use cargo_metadata::{MetadataCommand, camino::Utf8PathBuf};
+use cargo_metadata::{MetadataCommand, Package, camino::Utf8Path};
 use toml::Table;
 use walkdir::WalkDir;
+
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn main() -> ExitCode {
     let args = argh::cargo_from_env();
 
-    if let Err(error) = attach(args) {
-        // Trim trailing newline from Cargo's error messages.
-        let error = format!("{error}");
-        let error = error.trim();
+    let Err(error) = actual_main(args);
 
-        eprintln!("error: {error}");
+    eprintln!("error: {error}");
 
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    ExitCode::FAILURE
 }
 
 #[derive(FromArgs, Debug)]
@@ -55,125 +54,171 @@ struct Args {
     probe_args: Vec<String>,
 }
 
-fn attach(args: Args) -> Result<(), Box<dyn Error>> {
+fn actual_main(args: Args) -> Result<Infallible> {
     if args.release && args.debug {
-        Err("the release and debug flags may not be used together")?;
+        return Err("the release and debug flags may not be used together".into());
     }
 
     if args.bin.is_some() && args.example.is_some() {
-        Err("the bin and example options may not be used together")?;
+        return Err("the bin and example options may not be used together".into());
     }
 
-    let metadata = MetadataCommand::new().exec()?;
+    let metadata = (MetadataCommand::new().no_deps().exec())
+        // Trim trailing newlines from Cargo's errors.
+        .map_err(|e| e.to_string().trim().to_owned())?;
 
-    let package = metadata
-        .root_package()
-        .ok_or("could not determine which package to use binaries from")?;
+    let Some(package) = metadata.root_package() else {
+        return Err("could not determine which package to use binaries from".into());
+    };
 
-    let build_mode = args
-        .release
-        .then_some("release")
-        .or(args.debug.then_some("debug"));
+    let config = if args.probe_args.is_empty() || args.target.is_none() {
+        load_config(package)?
+    } else {
+        None
+    };
 
-    let target_names = match args.bin.or(args.example) {
-        Some(n) => vec![n],
+    let filters = resolve_filters(&args, &package, &config)?;
+
+    let probe_args = if args.probe_args.is_empty() {
+        find_probe_args(&config)?
+    } else {
+        args.probe_args
+    };
+
+    let Some(executable) = find_executable(&metadata.target_directory, filters) else {
+        return Err(format!("no matching executable found for package {}", package.name).into());
+    };
+
+    let error = Command::new("probe-rs")
+        .arg("attach")
+        .args(probe_args)
+        .arg(executable)
+        .exec();
+
+    Err(error.into())
+}
+
+fn load_config(package: &Package) -> Result<Option<Table>> {
+    let path = package.manifest_path.with_file_name(".cargo/config.toml");
+
+    let file = match read_to_string(path) {
+        Ok(f) => Some(f),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(_) => return Err("could not read {path}".into()),
+    };
+
+    if let Some(file) = file {
+        let table = file
+            .parse::<Table>()
+            .map_err(|_| "could not parse {path}")?;
+
+        Ok(Some(table))
+    } else {
+        Ok(None)
+    }
+}
+
+fn find_probe_args(config: &Option<Table>) -> Result<Vec<String>> {
+    let runners = config
+        .as_ref()
+        .and_then(|t| t.get("target"))
+        .and_then(|v| v.as_table())
+        .map(|t| t.values())
+        .map(|v| v.filter_map(|v| v.get("runner").and_then(|v| v.as_str())));
+
+    let probe_args = if let Some(runners) = runners {
+        runners
+            .filter_map(|r| r.strip_prefix("probe-rs run "))
+            .collect::<Vec<_>>()
+            .try_into()
+            .ok()
+            .map(|[r]: [_; 1]| r)
+            .map(|r| shlex::split(r))
+            .unwrap_or_default()
+            .ok_or("could not parse probe-rs arguments")?
+    } else {
+        vec![]
+    };
+
+    Ok(probe_args)
+}
+
+struct Filters {
+    names: Vec<String>,
+    build_mode: Option<String>,
+    build_target: Option<String>,
+}
+
+fn resolve_filters(args: &Args, package: &Package, config: &Option<Table>) -> Result<Filters> {
+    let build_mode = if args.release {
+        Some("release".into())
+    } else if args.debug {
+        Some("debug".into())
+    } else {
+        None
+    };
+
+    let build_target = match &args.target {
+        Some(t) => Some(t.as_str()),
+        None => config
+            .as_ref()
+            .and_then(|t| t.get("build"))
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("target"))
+            .and_then(|v| v.as_str()),
+    }
+    .map(|s| s.to_owned());
+
+    let names = match args.bin.clone().or(args.example.clone()) {
+        Some(t) => vec![t],
         None => package
             .targets
             .iter()
             .filter(|t| t.is_bin() || t.is_example())
-            .map(|t| t.name.clone())
+            .map(|t| t.name.to_owned())
             .collect(),
     };
 
-    let cargo_config_path = package.manifest_path.with_file_name(".cargo/config.toml");
-    let mut cargo_config = CargoConfig::Unloaded(cargo_config_path);
-
-    let target_triple = match args.target {
-        Some(t) => Some(t),
-        None => cargo_config
-            .get_or_load()?
-            .get("build")
-            .and_then(|v| v.as_table())
-            .and_then(|t| t.get("target"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_owned()),
+    let filters = Filters {
+        names,
+        build_mode,
+        build_target,
     };
 
-    // Have fun!
-    let probe_args = if !args.probe_args.is_empty() {
-        args.probe_args
-    } else {
-        cargo_config
-            .get_or_load()?
-            .get("target")
-            .and_then(|v| v.as_table())
-            .map(|t| t.values())
-            .and_then(|v| {
-                v.filter_map(|t| t.get("runner").and_then(|v| v.as_str()))
-                    .filter_map(|r| r.strip_prefix("probe-rs run "))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .ok()
-            })
-            .map(|[r]: [_; 1]| r)
-            .map(|a| shlex::split(a))
-            .unwrap_or_default()
-            .ok_or("could not parse probe-rs arguments")?
-    };
+    Ok(filters)
+}
 
-    let mut target_dir = metadata.target_directory.clone();
-
-    if let Some(target_triple) = target_triple {
-        target_dir.push(target_triple);
-    }
-
-    let executable = WalkDir::new(&target_dir)
+fn find_executable(
+    base: &Utf8Path,
+    Filters {
+        names,
+        build_mode,
+        build_target,
+    }: Filters,
+) -> Option<PathBuf> {
+    let target_files = WalkDir::new(&base)
+        .max_depth(4)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.file_type().is_file());
+
+    let execs = target_files
+        .filter(|e| names.iter().any(|x| x.as_str() == e.file_name()))
         .filter(|e| {
-            build_mode.is_none_or(|m| {
-                e.path()
-                    .strip_prefix(&target_dir)
-                    .is_ok_and(|p| p.starts_with(m))
-            })
-        })
-        .filter(|e| target_names.iter().any(|x| x.as_str() == e.file_name()))
+            let path = e.path().strip_prefix(&base).unwrap().parent().unwrap();
+
+            let matches_build_mode = build_mode
+                .as_deref()
+                .is_none_or(|m| path.iter().any(|c| c == m));
+
+            let matches_target_triple = build_target
+                .as_deref()
+                .is_none_or(|t| path.iter().any(|c| c == t));
+
+            matches_build_mode && matches_target_triple
+        });
+
+    execs
         .max_by_key(|e| e.metadata().unwrap().modified().unwrap())
-        .ok_or(format!(
-            "no matching executable found for package {}",
-            package.name
-        ))?;
-
-    Err(Command::new("probe-rs")
-        .arg("attach")
-        .args(probe_args)
-        .arg(executable.path())
-        .exec())?
-}
-
-enum CargoConfig {
-    Unloaded(Utf8PathBuf),
-    Loaded(Table),
-}
-
-impl CargoConfig {
-    fn get_or_load(&mut self) -> Result<&Table, Box<dyn Error>> {
-        match self {
-            Self::Loaded(table) => Ok(table),
-            Self::Unloaded(path) => {
-                *self = Self::Loaded(
-                    read_to_string(&path)
-                        .map_err(|_| format!("could not read {path}"))?
-                        .parse()
-                        .map_err(|_| "could not parse {p}")?,
-                );
-
-                match self {
-                    Self::Loaded(table) => Ok(table),
-                    _ => unreachable!(),
-                }
-            }
-        }
-    }
+        .map(|e| e.into_path())
 }

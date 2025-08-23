@@ -1,6 +1,7 @@
-use std::{fs::read_to_string, io::ErrorKind};
+use std::{fs::read_to_string, io::ErrorKind, str::FromStr};
 
 use cargo_metadata::Package;
+use cargo_platform::Platform;
 use toml::Table;
 
 use crate::Result;
@@ -31,14 +32,25 @@ pub(crate) fn find_build_target(config: &Table) -> Option<String> {
 }
 
 /// Find arguments to `probe-rs run` in runner configurations.
-pub(crate) fn find_probe_args(config: &Table) -> Result<Vec<String>> {
+pub(crate) fn find_probe_args(config: &Table, target: Option<&String>) -> Result<Vec<String>> {
     let Some(targets) = config.get("target").and_then(|v| v.as_table()) else {
         return Ok(vec![]);
     };
 
     let runners = targets
-        .values()
-        .filter_map(|v| v.get("runner").and_then(|v| v.as_str()))
+        .iter()
+        .filter(|(selector, _)| {
+            let Some(target) = &target else {
+                return true;
+            };
+
+            let Ok(platform) = Platform::from_str(selector) else {
+                return true;
+            };
+
+            platform.matches(target, &[])
+        })
+        .filter_map(|(_, v)| v.get("runner").and_then(|v| v.as_str()))
         .filter_map(|r| r.strip_prefix("probe-rs run "))
         .collect::<Vec<_>>();
 

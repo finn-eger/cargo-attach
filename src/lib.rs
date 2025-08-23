@@ -62,7 +62,7 @@ pub fn attach(args: Args) -> Result<Infallible> {
 
     let probe_args = if args.probe_args.is_empty() {
         if let Some(config) = &config {
-            conf::find_probe_args(config)?
+            conf::find_probe_args(config, build_target.as_ref())?
         } else {
             vec![]
         }
